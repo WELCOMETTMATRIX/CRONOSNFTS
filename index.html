@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLAZZY Cronos NFT Explorer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen p-8">
+  <div class="max-w-4xl mx-auto">
+    <h1 class="text-3xl font-bold text-center text-purple-600 mb-6">🌌 Cronos NFT Explorer</h1>
+    
+    <!-- Input Section -->
+    <input
+      type="text"
+      id="addressInput"
+      placeholder="Enter Cronos wallet or contract address"
+      class="w-full p-3 border border-gray-300 rounded-xl mb-4"
+    />
+    <button onclick="exploreNFTs()" class="w-full bg-purple-600 text-white py-2 rounded-xl hover:bg-purple-700">Explore</button>
+    
+    <!-- NFT Grid -->
+    <div id="nftGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mt-6"></div>
+  </div>
+
+  <script>
+    const apiKey = "CRONOSCAN_API_KEY"; // CRONOSCAN API KEY ENVIROMENT VARIABLE
+    const provider = new ethers.providers.JsonRpcProvider("https://evm.cronos.org");
+
+    // Resolve IPFS URLs to HTTP
+    function resolveIPFS(url) {
+      if (!url) return "";
+      return url.startsWith("ipfs://") ? url.replace("ipfs://", "https://ipfs.io/ipfs/") : url;
+    }
+
+    // Explore NFTs based on the input address (wallet or contract)
+    async function exploreNFTs() {
+      const address = document.getElementById("addressInput").value.trim();
+      const nftGrid = document.getElementById("nftGrid");
+      nftGrid.innerHTML = ""; // Clear the grid for new results
+
+      if (!ethers.utils.isAddress(address) && !isValidContractAddress(address)) {
+        alert("Invalid address or contract.");
+        return;
+      }
+
+      if (isContractAddress(address)) {
+        // Load NFTs from contract address
+        loadNFTsFromContract(address);
+      } else {
+        // Load NFTs from wallet address
+        loadNFTsFromWallet(address);
+      }
+    }
+
+    // Check if address is a valid contract address
+    function isContractAddress(address) {
+      return ethers.utils.isAddress(address) && address.length === 42;
+    }
+
+    // Validate contract address
+    function isValidContractAddress(address) {
+      return /^(0x)?[0-9a-fA-F]{40}$/.test(address);
+    }
+
+    // Fetch NFTs for a contract address
+    async function loadNFTsFromContract(contractAddress) {
+      const nftGrid = document.getElementById("nftGrid");
+
+      try {
+        const contract = new ethers.Contract(contractAddress, [
+          "function totalSupply() public view returns (uint256)",
+          "function tokenURI(uint256 tokenId) public view returns (string)"
+        ], provider);
+
+        const totalSupply = await contract.totalSupply();
+        const promises = [];
+
+        for (let tokenId = 1; tokenId <= totalSupply; tokenId++) {
+          promises.push(fetchNFTMetadata(contract, tokenId, contractAddress));
+        }
+
+        const results = await Promise.all(promises);
+        results.forEach(result => {
+          if (result) {
+            const div = createNFTDiv(result);
+            nftGrid.appendChild(div);
+          }
+        });
+
+      } catch (err) {
+        console.error("Error loading contract NFTs:", err);
+        alert("Could not load NFTs for this contract.");
+      }
+    }
+
+    // Fetch NFT metadata using tokenID
+    async function fetchNFTMetadata(contract, tokenId, contractAddress) {
+      try {
+        const uri = await contract.tokenURI(tokenId);
+        const metadataURL = resolveIPFS(uri);
+        const metadata = await fetch(metadataURL).then(r => r.json());
+
+        const imageURL = resolveIPFS(metadata.image || metadata.image_url);
+        return { metadata, imageURL, tokenId, contractAddress };
+      } catch (err) {
+        console.error("Error fetching metadata:", err);
+        return null;
+      }
+    }
+
+    // Create a div element to display the NFT
+    function createNFTDiv({ metadata, imageURL, tokenId, contractAddress }) {
+      const div = document.createElement("div");
+      div.className = "bg-white rounded-xl shadow p-4";
+      div.innerHTML = `
+        <img src="${imageURL}" alt="NFT" class="w-full h-60 object-cover rounded mb-2" onerror="this.src='https://via.placeholder.com/300x300?text=No+Image'">
+        <h3 class="font-bold text-lg">${metadata.name || 'Unnamed NFT'}</h3>
+        <p class="text-sm text-gray-600 truncate">${metadata.description || 'No description'}</p>
+        <p class="text-xs text-gray-400 mt-2">Token ID: ${tokenId}</p>
+        <p class="text-xs text-gray-400">Contract: ${contractAddress.slice(0, 10)}...</p>
+      `;
+      return div;
+    }
+
+    // Fetch NFTs for a wallet address
+    async function loadNFTsFromWallet(walletAddress) {
+      const nftGrid = document.getElementById("nftGrid");
+
+      const apiURL = `https://api.cronoscan.com/api?module=account&action=tokennfttx&address=${walletAddress}&startblock=0&endblock=99999999&sort=asc&apikey=${apiKey}`;
+      const res = await fetch(apiURL);
+      const data = await res.json();
+
+      if (data.status !== "1") {
+        nftGrid.innerHTML = "<p class='text-center text-red-500'>No NFTs found or invalid address.</p>";
+        return;
+      }
+
+      const seen = new Set();
+      data.result.reverse().forEach(async (tx) => {
+        const key = `${tx.contractAddress}-${tx.tokenID}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        try {
+          const metadata = await fetchNFTMetadataFromTx(tx);
+          const div = createNFTDiv(metadata);
+          nftGrid.appendChild(div);
+        } catch (e) {
+          console.warn("Error fetching NFT:", e);
+        }
+      });
+    }
+
+    // Fetch metadata from transaction for a wallet address
+    async function fetchNFTMetadataFromTx(tx) {
+      const nftContract = new ethers.Contract(tx.contractAddress, [
+        "function tokenURI(uint256 tokenId) view returns (string)"
+      ], provider);
+
+      const uri = await nftContract.tokenURI(tx.tokenID);
+      const metadataURL = resolveIPFS(uri);
+      const metadata = await fetch(metadataURL).then(r => r.json());
+      const imageURL = resolveIPFS(metadata.image || metadata.image_url);
+
+      return { metadata, imageURL, tokenId: tx.tokenID, contractAddress: tx.contractAddress };
+    }
+  </script>
+</body>
+</html>
